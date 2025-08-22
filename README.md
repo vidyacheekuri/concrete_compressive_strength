@@ -1,6 +1,10 @@
 ## Meta-Learning-Based Concrete Strength Predictor
 
 Live Demo: https://concrete-strength-app.onrender.com
+    **Note:** This application is hosted on a free service and may take up to 60 seconds to load for the first time as the server "wakes up." If you see an error, please wait a moment and refresh the page.
+
+<img src="webpage.png">
+
 
 An advanced machine learning application featuring a hierarchical CatBoost ensemble and a non-linear meta-learner to deliver high-precision predictions of concrete compressive strength. This project is based on the research paper, "Meta-Learning-Based Concrete Strength Prediction Using Stratified CatBoost Models and Domain-Informed Features."
 
