@@ -1,7 +1,8 @@
 ## Meta-Learning-Based Concrete Strength Predictor
 
-Live Demo: https://concrete-strength-app.onrender.com
-    **Note:** This application is hosted on a free service and may take up to 60 seconds to load for the first time as the server "wakes up." If you see an error, please wait a moment and refresh the page.
+**Live Demo:** https://concrete-strength-app.onrender.com
+    
+**Note:** This application is hosted on a free service and may take up to 60 seconds to load for the first time as the server "wakes up." If you see an error, please wait a moment and refresh the page.
 
 <img src="webpage.png">
 
