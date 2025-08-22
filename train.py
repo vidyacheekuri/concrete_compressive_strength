@@ -1544,6 +1544,727 @@ class EnhancedCatBoostPredictor:
         except ImportError:
             print("CatBoost is not installed. Please install it using: pip install catboost")
             return None, None
+        
+    def train_range_specific_models(self):
+        """Train separate models for different concrete strength ranges."""
+        try:
+            from catboost import CatBoostRegressor, Pool
+            print("\nTraining strength range-specific models...")
+
+            self.range_models = {}
+            self.range_preds = {}
+
+            # Updated parameters for different ranges with more focus on problematic ranges
+            range_params = {
+                'very_low': {  # Less than 20 MPa - Highest error rate
+                    'iterations': 2000,        # Increased from 1000
+                    'depth': 7,                # Increased from 6
+                    'learning_rate': 0.02,     # Lower for more stability
+                    'l2_leaf_reg': 5,          # Increased regularization
+                    'bootstrap_type': 'Bayesian',
+                    'min_data_in_leaf': 5,     # Increased to prevent overfitting
+                    'random_strength': 0.9     # Increased randomization
+                },
+                'low': {  # 20-40 MPa
+                    'iterations': 1500,
+                    'depth': 7,
+                    'learning_rate': 0.02,
+                    'l2_leaf_reg': 3,
+                    'bootstrap_type': 'Bayesian'
+                },
+                'medium': {  # 40-60 MPa
+                    'iterations': 1500,
+                    'depth': 8,
+                    'learning_rate': 0.02,
+                    'l2_leaf_reg': 3
+                },
+                'high': {  # Over 60 MPa - Few samples but high error rate
+                    'iterations': 1200,        # Increased from 1000
+                    'depth': 7,                # Increased from 6
+                    'learning_rate': 0.015,    # Lower for stability
+                    'l2_leaf_reg': 4,
+                    'bootstrap_type': 'Bayesian',
+                    'bagging_temperature': 1.5 # More aggressive bagging for few samples
+                }
+            }
+
+            # Train separate model for each strength range
+            for strength_range in self.strength_labels:
+                print(f"\nTraining model for {strength_range.replace('_', ' ').title()} Strength range...")
+
+                # Make sure indices are aligned properly - convert to numpy arrays if needed
+                y_ranges_train_array = np.array(self.y_ranges_train)
+                train_mask = (y_ranges_train_array == strength_range)
+
+                # Check if we have enough samples
+                if np.sum(train_mask) < 10:
+                    print(f"  Not enough samples for {strength_range} range. Skipping.")
+                    continue
+
+                # Use .loc with indices to avoid alignment issues
+                train_indices = np.where(train_mask)[0]
+                X_train_range = self.X_train.iloc[train_indices]
+                y_train_range = self.y_train.iloc[train_indices]
+
+                # Similarly for test data
+                y_ranges_test_array = np.array(self.y_ranges_test)
+                test_mask = (y_ranges_test_array == strength_range)
+                test_indices = np.where(test_mask)[0]
+
+                if len(test_indices) < 5:
+                    print(f"  Not enough test samples for {strength_range} range. Skipping metrics calculation.")
+                    test_samples = 0
+                else:
+                    X_test_range = self.X_test.iloc[test_indices]
+                    y_test_range = self.y_test.iloc[test_indices]
+                    test_samples = len(X_test_range)
+
+                print(f"  Training samples: {len(X_train_range)}, Test samples: {test_samples}")
+
+                # Get parameters for this range
+                model_params = range_params.get(strength_range, range_params['low'])  # Default to low params if not found
+
+                # Create and train model with range-specific parameters
+                range_model = CatBoostRegressor(
+                    iterations=model_params['iterations'],
+                    learning_rate=model_params['learning_rate'],
+                    depth=model_params['depth'],
+                    l2_leaf_reg=model_params.get('l2_leaf_reg', 3),
+                    loss_function='RMSE',
+                    eval_metric='RMSE',
+                    random_seed=self.random_state,
+                    od_type='Iter',
+                    od_wait=50,
+                    verbose=100,
+                    bootstrap_type=model_params.get('bootstrap_type', 'Bayesian'),
+                    min_data_in_leaf=model_params.get('min_data_in_leaf', 5),
+                    random_strength=model_params.get('random_strength', 0.5),
+                    bagging_temperature=model_params.get('bagging_temperature', 1.0)
+                )
+
+                # Create train pool
+                train_pool = Pool(X_train_range, y_train_range)
+
+                # Create eval pool if we have enough test samples
+                if test_samples >= 5:
+                    eval_pool = Pool(X_test_range, y_test_range)
+
+                    # Train model with eval set
+                    range_model.fit(
+                        train_pool,
+                        eval_set=eval_pool,
+                        use_best_model=True,
+                        verbose=100
+                    )
+
+                    # Calculate metrics
+                    y_pred_range = range_model.predict(X_test_range)
+                    metrics = self._calculate_metrics(y_test_range, y_pred_range)
+
+                    print(f"  {strength_range.replace('_', ' ').title()} Range Model Metrics:")
+                    for metric, value in metrics.items():
+                        print(f"    {metric}: {value}")
+                else:
+                    # Train model without eval set
+                    range_model.fit(
+                        train_pool,
+                        verbose=100
+                    )
+
+                # Store model
+                self.range_models[strength_range] = range_model
+
+                # Make predictions on full test set (for blending later)
+                self.range_preds[strength_range] = range_model.predict(self.X_test)
+
+            return self.range_models, self.range_preds
+
+        except Exception as e:
+            print(f"Error in training range-specific models: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+
+    def train_very_low_specialized_models(self):
+        """Train ultra-specialized models for very low strength concrete."""
+        try:
+            from catboost import CatBoostRegressor, Pool
+            print("\nTraining specialized models for very low strength concrete...")
+
+            # Get only very low samples using numpy arrays to avoid indexing issues
+            y_ranges_train_array = np.array(self.y_ranges_train)
+            mask = (y_ranges_train_array == 'very_low')
+
+            # Check if we have enough samples
+            if np.sum(mask) < 10:
+                print("  Not enough very low strength samples. Skipping.")
+                return {}, {}
+
+            # Use indices instead of boolean masks
+            train_indices = np.where(mask)[0]
+            X_very_low = self.X_train.iloc[train_indices]
+            y_very_low = self.y_train.iloc[train_indices]
+
+            # Further split by actual strength for more specialization
+            y_very_low_array = np.array(y_very_low)
+            low_mask = y_very_low_array < 15  # Ultra-low strength
+            mid_mask = (y_very_low_array >= 15) & (y_very_low_array < 20)  # Mid-low strength
+
+            self.very_low_specialized_models = {}
+            self.very_low_specialized_preds = {}
+
+            # Ultra-low strength model
+            if np.sum(low_mask) >= 10:
+                # Get indices for the ultra-low samples
+                ultra_low_indices = np.where(low_mask)[0]
+
+                print(f"  Training ultra-low strength model (<15 MPa) with {len(ultra_low_indices)} samples")
+                ultra_low_model = CatBoostRegressor(
+                    iterations=1500,
+                    depth=5,  # Lower depth to prevent overfitting on small samples
+                    learning_rate=0.01,  # Lower learning rate for stability
+                    l2_leaf_reg=6,  # Higher regularization
+                    min_data_in_leaf=3,
+                    verbose=0,
+                    random_seed=self.random_state
+                )
+
+                # Select rows using iloc with indices
+                X_ultra_low = X_very_low.iloc[ultra_low_indices]
+                y_ultra_low = y_very_low.iloc[ultra_low_indices]
+
+                ultra_low_model.fit(X_ultra_low, y_ultra_low)
+                self.very_low_specialized_models['ultra_low'] = ultra_low_model
+
+                # Make predictions on test set
+                self.very_low_specialized_preds['ultra_low'] = np.zeros(len(self.X_test))
+
+                # Identify test samples that would use this model
+                # - First get very_low test samples
+                y_ranges_test_array = np.array(self.y_ranges_test)
+                test_mask = (y_ranges_test_array == 'very_low')
+                test_indices = np.where(test_mask)[0]
+
+                # - Then identify which ones are <15 MPa
+                deep_preds = self.deep_catboost.predict(self.X_test)
+                ultra_low_test_mask = (deep_preds < 15)
+
+                # - Find intersection of very_low and <15 MPa
+                X_test_very_low = self.X_test.iloc[test_indices]
+                deep_preds_very_low = deep_preds[test_indices]
+                ultra_low_test_indices = np.where(deep_preds_very_low < 15)[0]
+
+                if len(ultra_low_test_indices) > 0:
+                    # Calculate metrics
+                    X_test_ultra_low = X_test_very_low.iloc[ultra_low_test_indices]
+                    y_test_ultra_low = self.y_test.iloc[test_indices].iloc[ultra_low_test_indices]
+
+                    ultra_low_preds = ultra_low_model.predict(X_test_ultra_low)
+                    metrics = self._calculate_metrics(y_test_ultra_low, ultra_low_preds)
+
+                    print(f"  Ultra-Low Strength Model Metrics (test samples: {len(ultra_low_test_indices)}):")
+                    for metric, value in metrics.items():
+                        print(f"    {metric}: {value}")
+
+                    # Store predictions for meta-learner - using all test indices
+                    for idx, very_low_idx in enumerate(test_indices):
+                        if idx in ultra_low_test_indices:
+                            test_sample = self.X_test.iloc[[very_low_idx]]
+                            self.very_low_specialized_preds['ultra_low'][very_low_idx] = ultra_low_model.predict(test_sample)[0]
+
+            # Mid-low strength model
+            if np.sum(mid_mask) >= 10:
+                # Get indices for the mid-low samples
+                mid_low_indices = np.where(mid_mask)[0]
+
+                print(f"  Training mid-low strength model (15-20 MPa) with {len(mid_low_indices)} samples")
+                mid_low_model = CatBoostRegressor(
+                    iterations=1500,
+                    depth=6,
+                    learning_rate=0.015,
+                    l2_leaf_reg=4,
+                    min_data_in_leaf=3,
+                    verbose=0,
+                    random_seed=self.random_state
+                )
+
+                # Select rows using iloc with indices
+                X_mid_low = X_very_low.iloc[mid_low_indices]
+                y_mid_low = y_very_low.iloc[mid_low_indices]
+
+                mid_low_model.fit(X_mid_low, y_mid_low)
+                self.very_low_specialized_models['mid_low'] = mid_low_model
+
+                # Make predictions on test set
+                self.very_low_specialized_preds['mid_low'] = np.zeros(len(self.X_test))
+
+                # Identify test samples that would use this model
+                # - First get very_low test samples
+                y_ranges_test_array = np.array(self.y_ranges_test)
+                test_mask = (y_ranges_test_array == 'very_low')
+                test_indices = np.where(test_mask)[0]
+
+                # - Then identify which ones are 15-20 MPa
+                deep_preds = self.deep_catboost.predict(self.X_test)
+
+                # - Find intersection of very_low and 15-20 MPa
+                X_test_very_low = self.X_test.iloc[test_indices]
+                deep_preds_very_low = deep_preds[test_indices]
+                mid_low_test_indices = np.where((deep_preds_very_low >= 15) & (deep_preds_very_low < 20))[0]
+
+                if len(mid_low_test_indices) > 0:
+                    # Calculate metrics
+                    X_test_mid_low = X_test_very_low.iloc[mid_low_test_indices]
+                    y_test_mid_low = self.y_test.iloc[test_indices].iloc[mid_low_test_indices]
+
+                    mid_low_preds = mid_low_model.predict(X_test_mid_low)
+                    metrics = self._calculate_metrics(y_test_mid_low, mid_low_preds)
+
+                    print(f"  Mid-Low Strength Model Metrics (test samples: {len(mid_low_test_indices)}):")
+                    for metric, value in metrics.items():
+                        print(f"    {metric}: {value}")
+
+                    # Store predictions for meta-learner - using all test indices
+                    for idx, very_low_idx in enumerate(test_indices):
+                        if idx in mid_low_test_indices:
+                            test_sample = self.X_test.iloc[[very_low_idx]]
+                            self.very_low_specialized_preds['mid_low'][very_low_idx] = mid_low_model.predict(test_sample)[0]
+
+            return self.very_low_specialized_models, self.very_low_specialized_preds
+
+        except Exception as e:
+            print(f"Error in training very low specialized models: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {}, {}
+
+    def train_medium_bias_correction(self):
+        """Create a bias correction model specifically for medium range."""
+        try:
+            from catboost import CatBoostRegressor
+            print("\nTraining medium range bias correction model...")
+
+            # Identify medium range samples using numpy arrays
+            y_ranges_train_array = np.array(self.y_ranges_train)
+            mask = (y_ranges_train_array == 'medium')
+
+            # Get indices from mask
+            train_indices = np.where(mask)[0]
+
+            if len(train_indices) < 20:
+                print("  Not enough medium range samples for bias correction. Skipping.")
+                return None, None
+
+            # Use indices to select rows
+            X_medium = self.X_train.iloc[train_indices]
+            y_medium = self.y_train.iloc[train_indices]
+
+            # Calculate how much our main model over-predicts
+            main_preds = self.deep_catboost.predict(X_medium)
+            bias = main_preds - y_medium
+
+            print(f"  Average bias in medium range: {bias.mean():.2f} MPa")
+            print(f"  Max bias in medium range: {bias.max():.2f} MPa")
+
+            # Train a model to predict this bias
+            bias_model = CatBoostRegressor(
+                iterations=800,
+                depth=4,
+                learning_rate=0.01,
+                l2_leaf_reg=5,
+                verbose=0,
+                random_seed=self.random_state
+            )
+
+            bias_model.fit(X_medium, bias)
+            self.medium_bias_model = bias_model
+
+            # Make predictions on medium range test samples
+            y_ranges_test_array = np.array(self.y_ranges_test)
+            medium_test_mask = (y_ranges_test_array == 'medium')
+            test_indices = np.where(medium_test_mask)[0]
+
+            if len(test_indices) > 0:
+                X_test_medium = self.X_test.iloc[test_indices]
+                y_test_medium = self.y_test.iloc[test_indices]
+
+                # Get the deep model predictions
+                deep_preds_medium = self.deep_catboost.predict(X_test_medium)
+
+                # Get the estimated bias
+                estimated_bias = self.medium_bias_model.predict(X_test_medium)
+
+                # Apply bias correction
+                corrected_preds = deep_preds_medium - estimated_bias * 0.7  # 70% of the bias
+
+                # Calculate metrics
+                uncorrected_metrics = self._calculate_metrics(y_test_medium, deep_preds_medium)
+                corrected_metrics = self._calculate_metrics(y_test_medium, corrected_preds)
+
+                print("\n  Medium Range Before Correction:")
+                for metric, value in uncorrected_metrics.items():
+                    print(f"    {metric}: {value}")
+
+                print("\n  Medium Range After Correction:")
+                for metric, value in corrected_metrics.items():
+                    print(f"    {metric}: {value}")
+
+                # Store the bias predictions for meta-learner
+                self.medium_bias_preds = np.zeros(len(self.X_test))
+                for i, idx in enumerate(test_indices):
+                    self.medium_bias_preds[idx] = estimated_bias[i]
+
+            return self.medium_bias_model, getattr(self, 'medium_bias_preds', None)
+
+        except Exception as e:
+            print(f"Error in training medium bias correction: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+
+    def train_boundary_models(self):
+        """Train specialized models for boundary regions between strength ranges."""
+        try:
+            from catboost import CatBoostRegressor, Pool
+            print("\nTraining boundary region models...")
+
+            self.boundary_models = {}
+            self.boundary_preds = {}
+
+            # Define boundary regions with 2 MPa overlap on each side
+            boundary_regions = [
+                (15, 25, 'very_low_low_boundary'),  # Between very_low and low
+                (38, 42, 'low_medium_boundary'),    # Between low and medium
+                (58, 62, 'medium_high_boundary')    # Between medium and high
+            ]
+
+            for low_bound, high_bound, name in boundary_regions:
+                print(f"\nTraining model for {name.replace('_', ' ').title()} region...")
+
+                # Use numpy arrays to avoid indexing issues
+                y_train_array = np.array(self.y_train)
+                mask = (y_train_array >= low_bound) & (y_train_array <= high_bound)
+
+                # Check if we have enough samples
+                sample_count = np.sum(mask)
+
+                if sample_count < 20:  # Skip if too few samples
+                    print(f"  Insufficient samples ({sample_count}) for {name}. Skipping.")
+                    continue
+
+                # Use indices from the mask - this avoids pandas alignment issues
+                train_indices = np.where(mask)[0]
+                X_boundary = self.X_train.iloc[train_indices]
+                y_boundary = self.y_train.iloc[train_indices]
+
+                print(f"  Training with {len(X_boundary)} boundary samples.")
+
+                # Create boundary-specific model
+                boundary_model = CatBoostRegressor(
+                    iterations=1200,
+                    depth=6,
+                    learning_rate=0.02,
+                    l2_leaf_reg=3.5,
+                    loss_function='RMSE',
+                    eval_metric='RMSE',
+                    random_seed=self.random_state,
+                    od_type='Iter',
+                    od_wait=50,
+                    verbose=0
+                )
+
+                # Train model
+                train_pool = Pool(X_boundary, y_boundary)
+                boundary_model.fit(train_pool, verbose=100)
+
+                # Store model
+                self.boundary_models[name] = boundary_model
+
+                # Make predictions on full test set (for blending later)
+                self.boundary_preds[name] = boundary_model.predict(self.X_test)
+
+                # Calculate metrics for boundary region test samples
+                y_test_array = np.array(self.y_test)
+                test_mask = (y_test_array >= low_bound) & (y_test_array <= high_bound)
+                test_indices = np.where(test_mask)[0]
+
+                if len(test_indices) > 0:
+                    X_test_boundary = self.X_test.iloc[test_indices]
+                    y_test_boundary = self.y_test.iloc[test_indices]
+
+                    boundary_preds = boundary_model.predict(X_test_boundary)
+                    metrics = self._calculate_metrics(y_test_boundary, boundary_preds)
+
+                    print(f"  {name.replace('_', ' ').title()} Model Metrics:")
+                    for metric, value in metrics.items():
+                        print(f"    {metric}: {value}")
+
+            return self.boundary_models, self.boundary_preds
+
+        except Exception as e:
+            print(f"Error in training boundary models: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+
+    def train_age_specific_models(self):
+        """Train specialized models for different concrete age groups."""
+        try:
+            from catboost import CatBoostRegressor, Pool
+            print("\nTraining age-specific models...")
+
+            self.age_models = {}
+            self.age_preds = {}
+
+            # Define age bins and labels
+            age_bins = [0, 3, 7, 28, 90, float('inf')]
+            age_labels = ['very_early', 'early', 'standard', 'mature', 'old']
+
+            # Create age groups
+            age_col = 'Age (day)'
+            X_train_age = np.array(self.X_train[age_col])
+
+            for i,age_group in enumerate(age_labels):
+                if i >= len(age_bins) - 1:
+                    continue  # Skip if we've reached the end of bins
+
+                print(f"\nTraining model for {age_group.replace('_', ' ').title()} Age concrete...")
+
+                # Get data for this age group using numpy for mask creation
+                if i == len(age_bins) - 2:  # Last group
+                    mask = (X_train_age >= age_bins[i]) & (X_train_age <= age_bins[i+1])
+                else:
+                    mask = (X_train_age >= age_bins[i]) & (X_train_age < age_bins[i+1])
+
+                # Get indices from mask
+                train_indices = np.where(mask)[0]
+                sample_count = len(train_indices)
+
+                if sample_count < 20:  # Skip if too few samples
+                    print(f"  Insufficient samples ({sample_count}) for {age_group} age. Skipping.")
+                    continue
+
+                # Use indices to select rows
+                X_age = self.X_train.iloc[train_indices]
+                y_age = self.y_train.iloc[train_indices]
+
+                print(f"  Training with {len(X_age)} age-specific samples.")
+
+                # Create age-specific model with appropriate parameters
+                if age_group in ['very_early', 'early']:
+                    # More careful tuning for early-age concrete
+                    age_model = CatBoostRegressor(
+                        iterations=1500,
+                        depth=6,
+                        learning_rate=0.02,
+                        l2_leaf_reg=4,
+                        loss_function='RMSE',
+                        eval_metric='RMSE',
+                        random_seed=self.random_state,
+                        od_type='Iter',
+                        od_wait=50,
+                        verbose=0
+                    )
+                else:
+                    age_model = CatBoostRegressor(
+                        iterations=1200,
+                        depth=6,
+                        learning_rate=0.025,
+                        l2_leaf_reg=3,
+                        loss_function='RMSE',
+                        eval_metric='RMSE',
+                        random_seed=self.random_state,
+                        od_type='Iter',
+                        od_wait=50,
+                        verbose=0
+                    )
+
+                # Train model
+                train_pool = Pool(X_age, y_age)
+                age_model.fit(train_pool, verbose=100)
+
+                # Store model
+                self.age_models[age_group] = age_model
+
+                # Make predictions on full test set (for blending later)
+                self.age_preds[age_group] = age_model.predict(self.X_test)
+
+                # Calculate metrics for age group test samples
+                X_test_age = np.array(self.X_test[age_col])
+                if i == len(age_bins) - 2:  # Last group
+                    test_mask = (X_test_age >= age_bins[i]) & (X_test_age <= age_bins[i+1])
+                else:
+                    test_mask = (X_test_age >= age_bins[i]) & (X_test_age < age_bins[i+1])
+
+                test_indices = np.where(test_mask)[0]
+
+                if len(test_indices) > 0:
+                    X_test_age_subset = self.X_test.iloc[test_indices]
+                    y_test_age = self.y_test.iloc[test_indices]
+
+                    age_preds = age_model.predict(X_test_age_subset)
+                    metrics = self._calculate_metrics(y_test_age, age_preds)
+
+                    print(f"  {age_group.replace('_', ' ').title()} Age Model Metrics:")
+                    for metric, value in metrics.items():
+                        print(f"    {metric}: {value}")
+
+            return self.age_models, self.age_preds
+
+        except ImportError:
+            print("CatBoost is not installed. Please install it using: pip install catboost")
+            return None, None
+
+    def train_meta_learner(self):
+        """Train a non-linear meta-learner with all specialized models."""
+        if not hasattr(self, 'deep_catboost'):
+            print("Must train deep_catboost first!")
+            return None, None
+
+        print("\\nTraining enhanced non-linear meta-learner ensemble...")
+
+        # --- Step 1: Create meta-features from all model predictions ---
+        meta_features_list = [self.catboost_preds] # Start with deep model predictions
+
+        # Dynamically add predictions from all available trained models
+        model_sets = {
+            'range_preds': getattr(self, 'range_preds', {}),
+            'boundary_preds': getattr(self, 'boundary_preds', {}),
+            'age_preds': getattr(self, 'age_preds', {}),
+            'very_low_specialized_preds': getattr(self, 'very_low_specialized_preds', {})
+        }
+
+        for pred_dict in model_sets.values():
+            for pred_array in pred_dict.values():
+                meta_features_list.append(pred_array)
+
+        if hasattr(self, 'medium_bias_preds') and self.medium_bias_preds is not None:
+            bias_corrected_preds = self.catboost_preds - self.medium_bias_preds * 0.7
+            meta_features_list.append(bias_corrected_preds)
+
+        meta_features_from_models = np.column_stack(meta_features_list)
+
+        # --- Step 2: Create range indicators ---
+        range_indicators = pd.get_dummies(self.y_ranges_test).values
+
+        # --- Step 3: Combine everything into the final feature set ---
+        # This is the crucial fix: combine all parts before creating the DataFrame
+        final_meta_features_array = np.column_stack([
+            meta_features_from_models,
+            range_indicators,
+            self.X_test.values  # Add original scaled features
+        ])
+
+        # --- Step 4: Create the DataFrame and feature names for the meta-learner ---
+        # The names must now reflect this final, complete feature set
+        model_pred_names = [f"meta_pred_{i}" for i in range(meta_features_from_models.shape[1])]
+        indicator_names = [f"range_{label}" for label in self.strength_labels]
+
+        # Combine all names
+        self.meta_feature_names = model_pred_names + indicator_names + self.all_features
+
+        meta_features_df = pd.DataFrame(final_meta_features_array, columns=self.meta_feature_names)
+        print(f"Meta-features created with shape: {meta_features_df.shape}")
+
+        # --- Step 5: Train the meta-learner on the complete feature set ---
+        from catboost import CatBoostRegressor
+        from sklearn.model_selection import train_test_split
+
+        meta_catboost = CatBoostRegressor(
+            iterations=1000, learning_rate=0.015, depth=5,
+            loss_function='RMSE', random_seed=self.random_state, verbose=0,
+            l2_leaf_reg=4, bootstrap_type='Bayesian'
+        )
+
+        # Split the complete meta-features DataFrame
+        meta_X_train, meta_X_val, meta_y_train, meta_y_val = train_test_split(
+            meta_features_df, self.y_test,
+            test_size=0.3,
+            random_state=self.random_state
+        )
+
+        meta_catboost.fit(meta_X_train, meta_y_train, eval_set=(meta_X_val, meta_y_val))
+
+        # Make final predictions
+        meta_preds = meta_catboost.predict(meta_features_df)
+
+        self.meta_learner = meta_catboost
+        self.meta_learner_type = 'catboost'
+        self.meta_preds = meta_preds
+        self.meta_metrics = self._calculate_metrics(self.y_test, meta_preds)
+
+        print("\\nMeta-Learner Metrics:")
+        for metric, value in self.meta_metrics.items():
+            print(f"  {metric}: {value}")
+
+        self._create_meta_feature_generator()
+
+        return self.meta_metrics, self.meta_preds
+
+    def _create_meta_feature_generator(self):
+        """Create a function to generate meta-features for new data."""
+        def generate_meta_features(self, X):
+          """Generate meta-features for new data samples."""
+          meta_features = []
+
+          # Deep CatBoost predictions
+          deep_preds = self.deep_catboost.predict(X)
+          meta_features.append(deep_preds)
+
+          # Range-specific models
+          for range_name in self.strength_labels:
+              if hasattr(self, 'range_models') and range_name in self.range_models:
+                  meta_features.append(self.range_models[range_name].predict(X))
+
+          # Boundary models
+          if hasattr(self, 'boundary_models') and self.boundary_models:
+              for name, model in self.boundary_models.items():
+                  meta_features.append(model.predict(X))
+
+          # Age-specific models
+          if hasattr(self, 'age_models') and self.age_models:
+              for age_group, model in self.age_models.items():
+                  meta_features.append(model.predict(X))
+
+          # Very low models
+          if hasattr(self, 'very_low_specialized_models') and self.very_low_specialized_models:
+              for name, model in self.very_low_specialized_models.items():
+                  meta_features.append(model.predict(X))
+
+          # Bias-corrected predictions
+          if hasattr(self, 'medium_bias_model'):
+              bias_corrected_preds = deep_preds.copy()
+              medium_mask = (deep_preds >= 40) & (deep_preds < 60)
+              if np.any(medium_mask):
+                  medium_indices = np.where(medium_mask)[0]
+                  X_medium = X.iloc[medium_indices]
+                  bias_predictions = self.medium_bias_model.predict(X_medium)
+                  for idx, i in enumerate(medium_indices):
+                      bias_corrected_preds[i] -= bias_predictions[idx] * 0.7
+              meta_features.append(bias_corrected_preds)
+
+          # Estimate range and create one-hot
+          estimated_ranges = pd.cut(deep_preds, bins=self.strength_bins, labels=self.strength_labels)
+          range_indicators = pd.get_dummies(estimated_ranges).reindex(columns=self.strength_labels, fill_value=0).values
+
+          # Stack everything
+          meta_features_array = np.column_stack(meta_features)
+          meta_features_array = np.column_stack([meta_features_array, range_indicators, X.values])
+
+          # Convert to DataFrame with proper column names
+          meta_feature_names = [f"meta_{i}" for i in range(meta_features_array.shape[1])]
+          meta_features_df = pd.DataFrame(meta_features_array, columns = self.meta_feature_names)
+
+
+          print("✅ Final meta feature shape:", meta_features_array.shape)
+          if hasattr(self.meta_learner, 'n_features_in_'):
+              print(f"📦 Meta-learner expects: {self.meta_learner.n_features_in_} features")
+          elif hasattr(self.meta_learner, 'feature_count_'):
+              print(f"📦 Meta-learner expects: {self.meta_learner.feature_count_} features")
+
+          return meta_features_df
+
+        self.generate_meta_features = generate_meta_features.__get__(self, self.__class__)
 
     # Include all other training methods here but check for CATBOOST_AVAILABLE
     # ... [rest of your methods remain the same, just add the CATBOOST_AVAILABLE check where needed]
@@ -1625,64 +2346,6 @@ class EnhancedCatBoostPredictor:
             predictor._create_meta_feature_generator()
 
         return predictor
-
-    def _create_meta_feature_generator(self):
-        """Create a function to generate meta-features for new data."""
-        def generate_meta_features(self, X):
-          """Generate meta-features for new data samples."""
-          meta_features = []
-
-          # Deep CatBoost predictions
-          deep_preds = self.deep_catboost.predict(X)
-          meta_features.append(deep_preds)
-
-          # Range-specific models
-          for range_name in self.strength_labels:
-              if hasattr(self, 'range_models') and range_name in self.range_models:
-                  meta_features.append(self.range_models[range_name].predict(X))
-
-          # Boundary models
-          if hasattr(self, 'boundary_models') and self.boundary_models:
-              for name, model in self.boundary_models.items():
-                  meta_features.append(model.predict(X))
-
-          # Age-specific models
-          if hasattr(self, 'age_models') and self.age_models:
-              for age_group, model in self.age_models.items():
-                  meta_features.append(model.predict(X))
-
-          # Very low models
-          if hasattr(self, 'very_low_specialized_models') and self.very_low_specialized_models:
-              for name, model in self.very_low_specialized_models.items():
-                  meta_features.append(model.predict(X))
-
-          # Bias-corrected predictions
-          if hasattr(self, 'medium_bias_model'):
-              bias_corrected_preds = deep_preds.copy()
-              medium_mask = (deep_preds >= 40) & (deep_preds < 60)
-              if np.any(medium_mask):
-                  medium_indices = np.where(medium_mask)[0]
-                  X_medium = X.iloc[medium_indices]
-                  bias_predictions = self.medium_bias_model.predict(X_medium)
-                  for idx, i in enumerate(medium_indices):
-                      bias_corrected_preds[i] -= bias_predictions[idx] * 0.7
-              meta_features.append(bias_corrected_preds)
-
-          # Estimate range and create one-hot
-          estimated_ranges = pd.cut(deep_preds, bins=self.strength_bins, labels=self.strength_labels)
-          range_indicators = pd.get_dummies(estimated_ranges).reindex(columns=self.strength_labels, fill_value=0).values
-
-          # Stack everything
-          meta_features_array = np.column_stack(meta_features)
-          meta_features_array = np.column_stack([meta_features_array, range_indicators, X.values])
-
-          # Convert to DataFrame with proper column names
-          meta_feature_names = [f"meta_{i}" for i in range(meta_features_array.shape[1])]
-          meta_features_df = pd.DataFrame(meta_features_array, columns = self.meta_feature_names)
-
-          return meta_features_df
-
-        self.generate_meta_features = generate_meta_features.__get__(self, self.__class__)
 
     def detect_and_correct_outliers(self, X, predictions):
         """Detect and correct likely outlier predictions."""
