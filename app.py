@@ -418,7 +418,7 @@ print("✅ Predictor loaded successfully for the app.")
 @app.route('/')
 def home():
     # Assumes you have an index.html file in a 'templates' folder
-    return render_template('index.html') 
+    return render_template('index1.html') 
 
 @app.route('/predict', methods=['POST'])
 def predict_route():

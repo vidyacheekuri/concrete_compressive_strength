@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Concrete Strength Prediction AI</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            /* New soft yellow background color */
+            background-color: #fef9e7; 
+            background-image: none; /* Removed the dot pattern */
+        }
+        /* Glassmorphism effect for cards */
+        .glass-card {
+            background: rgba(255, 255, 255, 0.5); /* Semi-transparent white */
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        /* Animation for elements fading in on scroll */
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .fade-in-up {
+            animation: fadeInUp 0.8s ease-out forwards;
+        }
+        /* Custom Keyframes for a soft glow on focus */
+        @keyframes glow {
+            from { box-shadow: 0 0 0px 0px #ff6f61; }
+            to { box-shadow: 0 0 10px 2px #ff6f61; }
+        }
+        input:focus {
+            animation: glow 0.5s ease-in-out forwards;
+        }
+        /* Button hover animation */
+        .predict-btn-hover:hover {
+            transform: scale(1.05);
+            box-shadow: 0 10px 20px rgba(255, 111, 97, 0.3);
+        }
+    </style>
+</head>
+<body class="text-gray-800">
+
+    <header class="bg-white/50 backdrop-blur-lg sticky top-0 z-50 shadow-lg shadow-gray-200">
+        <nav class="container mx-auto px-6 py-4 flex justify-between items-center">
+            <div class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-orange-400 to-red-500">
+                ConcreteAI
+            </div>
+            <div class="hidden md:flex space-x-8 font-bold text-xl">
+                <a href="#predictor" class="text-red-700 hover:text-red-900 transition">Predictor</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container mx-auto px-6 py-16">
+
+        <section id="predictor" class="glass-card rounded-2xl p-8 md:p-12 mt-4">
+            <div class="text-center mb-12">
+                <h1 class="text-4xl md:text-4xl font-black text-gray-900 leading-tight">
+                    Predict Concrete Compressive Strength
+                </h1>
+                <p class="text-gray-600 mt-5 max-w-2xl mx-auto text-xl font-bold">
+                    Enter your data to predict compressive strength.
+                </p>
+            </div>
+
+            <form id="prediction-form" class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+                </form>
+
+            <div class="mt-10 text-center">
+                <button id="predict-btn" type="button" class="w-full md:w-auto bg-gradient-to-r from-orange-400 to-red-500 hover:from-orange-500 hover:to-red-600 text-white font-bold py-4 px-12 rounded-lg text-lg transition-all transform predict-btn-hover focus:outline-none focus:ring-4 focus:ring-orange-500/50 shadow-lg shadow-orange-500/30">
+                    Calculate Strength
+                </button>
+            </div>
+
+            <div id="loading-indicator" class="mt-8 text-center hidden"><svg class="animate-spin h-8 w-8 text-blue-600 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><p class="text-gray-600 mt-2 font-bold text-base">Analyzing mix...</p></div>
+            <div id="result-container" class="mt-10 text-center hidden">
+                 <div class="bg-white/50 p-6 rounded-lg border border-gray-200">
+                    <p class="text-lg text-gray-600 font-bold">Predicted Compressive Strength:</p>
+                    <p id="prediction-result" class="text-6xl font-extrabold text-gray-900 mt-2">0.00 MPa</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="bg-gray-100 mt-24">
+        <div class="container mx-auto px-6 py-10 text-center text-gray-500 font-bold">
+            <p class="text-2xl font-bold text-red-700">University of Houston</p>
+            <p class="mt-2 text-base">A machine learning project demonstrating predictive modeling and web deployment.</p>
+        </div>
+    </footer>
+
+    <script>
+        // --- Configuration ---
+        const modelFeatures = [
+            { name: 'Cement', label: 'Cement (kg/m³) - Range: (100-600)', placeholder: 'e.g., 280' },
+            { name: 'Blast_Furnace_Slag', label: 'Blast Furnace Slag (kg/m³) - Range: (0-400)', placeholder: 'e.g., 150' },
+            { name: 'Fly_Ash', label: 'Fly Ash (kg/m³) - Range: (0-250)', placeholder: 'e.g., 0' },
+            { name: 'Water', label: 'Water (kg/m³) - Range: (100-300)', placeholder: 'e.g., 180' },
+            { name: 'Superplasticizer', label: 'Superplasticizer (kg/m³) - Range: (0-40)', placeholder: 'e.g., 8' },
+            { name: 'Coarse_Aggregate', label: 'Coarse Aggregate (kg/m³) - Range: (700-1200)', placeholder: 'e.g., 950' },
+            { name: 'Fine_Aggregate', label: 'Fine Aggregate (kg/m³) - Range: (500-1000)', placeholder: 'e.g., 750' },
+            { name: 'Age', label: 'Age (days) - Range: (0-365)', placeholder: 'e.g., 28' },
+        ];
+        
+        // --- UI Setup ---
+        const form = document.getElementById('prediction-form');
+        const predictBtn = document.getElementById('predict-btn');
+        const resultContainer = document.getElementById('result-container');
+        const predictionResult = document.getElementById('prediction-result');
+        const loadingIndicator = document.getElementById('loading-indicator');
+        
+        function createInputFields() {
+            let html = '';
+            modelFeatures.forEach(feature => {
+                html += `
+                    <div class="flex flex-col">
+                        <label for="${feature.name}" class="mb-2 font-bold text-lg text-gray-600">${feature.label}</label>
+                        <input type="number" step="any" id="${feature.name}" name="${feature.name}" 
+                               class="px-4 py-3 bg-gray-100 border border-gray-300 rounded-lg text-gray-800 focus:ring-blue-500 focus:border-blue-500 transition text-base"
+                               placeholder="${feature.placeholder}" required>
+                    </div>
+                `;
+            });
+            form.innerHTML = html;
+        }
+
+        // --- Prediction Logic ---
+        async function handlePrediction() {
+            if (!form.checkValidity()) { form.reportValidity(); return; }
+            loadingIndicator.classList.remove('hidden');
+            resultContainer.classList.add('hidden');
+            predictBtn.disabled = true;
+            predictBtn.classList.add('opacity-50', 'cursor-not-allowed');
+            const formData = new FormData(form);
+            const inputData = {};
+            modelFeatures.forEach(feature => {
+                inputData[feature.name] = parseFloat(formData.get(feature.name));
+            });
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(inputData),
+                });
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Prediction request failed');
+                }
+                const result = await response.json();
+                animateValue(predictionResult, 0, result.prediction.toFixed(2), 1000); // Animate the number
+                resultContainer.classList.remove('hidden');
+                resultContainer.classList.add('fade-in');
+            } catch (error) {
+                console.error("Prediction failed:", error);
+                predictionResult.textContent = `Error: ${error.message}`;
+                resultContainer.classList.remove('hidden');
+            } finally {
+                loadingIndicator.classList.add('hidden');
+                predictBtn.disabled = false;
+                predictBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        }
+        
+        // --- Animation Function for Count-Up Effect ---
+        function animateValue(obj, start, end, duration) {
+            let startTimestamp = null;
+            const step = (timestamp) => {
+                if (!startTimestamp) startTimestamp = timestamp;
+                const progress = Math.min((timestamp - startTimestamp) / duration, 1);
+                obj.textContent = (progress * (end - start) + start).toFixed(2) + ' MPa';
+                if (progress < 1) {
+                    window.requestAnimationFrame(step);
+                }
+            };
+            window.requestAnimationFrame(step);
+        }
+
+        // --- Event Listeners & Initializers ---
+        document.addEventListener('DOMContentLoaded', () => {
+            createInputFields();
+        });
+        predictBtn.addEventListener('click', handlePrediction);
+        form.addEventListener('submit', (e) => { e.preventDefault(); handlePrediction(); });
+    </script>
+</body>
+</html>
